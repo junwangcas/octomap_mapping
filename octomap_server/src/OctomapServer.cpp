@@ -261,17 +261,20 @@ bool OctomapServer::openFile(const std::string& filename){
 }
 
 void OctomapServer::insertCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& cloud){
+  // walltime？
   ros::WallTime startTime = ros::WallTime::now();
 
 
+  // 一共有的frame： world frame = map frame, base frame, sensor frame
   //
-  // ground filtering in base frame
+  // ground filtering in base frame；
   //
   PCLPointCloud pc; // input cloud for filtering and ground-detection
   pcl::fromROSMsg(*cloud, pc);
 
   tf::StampedTransform sensorToWorldTf;
   try {
+    // 这里就是找到这个变换关系
     m_tfListener.lookupTransform(m_worldFrameId, cloud->header.frame_id, cloud->header.stamp, sensorToWorldTf);
   } catch(tf::TransformException& ex){
     ROS_ERROR_STREAM( "Transform error of sensor data: " << ex.what() << ", quitting callback");
@@ -282,6 +285,7 @@ void OctomapServer::insertCloudCallback(const sensor_msgs::PointCloud2::ConstPtr
   pcl_ros::transformAsMatrix(sensorToWorldTf, sensorToWorld);
 
 
+  // 对输入的点云进行过滤
   // set up filter for height range, also removes NANs:
   pcl::PassThrough<PCLPoint> pass_x;
   pass_x.setFilterFieldName("x");
@@ -293,6 +297,7 @@ void OctomapServer::insertCloudCallback(const sensor_msgs::PointCloud2::ConstPtr
   pass_z.setFilterFieldName("z");
   pass_z.setFilterLimits(m_pointcloudMinZ, m_pointcloudMaxZ);
 
+  // 将点云分为两种
   PCLPointCloud pc_ground; // segmented ground plane
   PCLPointCloud pc_nonground; // everything else
 
@@ -328,7 +333,7 @@ void OctomapServer::insertCloudCallback(const sensor_msgs::PointCloud2::ConstPtr
     pcl::transformPointCloud(pc_ground, pc_ground, baseToWorld);
     pcl::transformPointCloud(pc_nonground, pc_nonground, baseToWorld);
   } else {
-    // directly transform to map frame:
+    // directly transform to map frame: 直接将点云转换到世界系下
     pcl::transformPointCloud(pc, pc, sensorToWorld);
 
     // just filter height range:
@@ -346,11 +351,13 @@ void OctomapServer::insertCloudCallback(const sensor_msgs::PointCloud2::ConstPtr
   }
 
 
+  // insert scan的时候，使用的是世界坐标系，当然，这个origin也是世界系的
   insertScan(sensorToWorldTf.getOrigin(), pc_ground, pc_nonground);
 
   double total_elapsed = (ros::WallTime::now() - startTime).toSec();
   ROS_DEBUG("Pointcloud insertion in OctomapServer done (%zu+%zu pts (ground/nonground), %f sec)", pc_ground.size(), pc_nonground.size(), total_elapsed);
 
+  // 处理一帧完，就进行
   publishAll(cloud->header.stamp);
 }
 
@@ -369,7 +376,7 @@ void OctomapServer::insertScan(const tf::Point& sensorOriginTf, const PCLPointCl
 
   // instead of direct scan insertion, compute update to filter ground:
   KeySet free_cells, occupied_cells;
-  // insert ground points only as free:
+  // insert ground points only as free: 地面点，全部设置为free
   for (PCLPointCloud::const_iterator it = ground.begin(); it != ground.end(); ++it){
     point3d point(it->x, it->y, it->z);
 
@@ -380,11 +387,12 @@ void OctomapServer::insertScan(const tf::Point& sensorOriginTf, const PCLPointCl
       point = sensorOrigin + (point - sensorOrigin).normalized() * m_maxRange;
     }
 
-    // only clear space (ground points)
+    // only clear space (ground points)；从中心出发，对地面上的点，求光束。然后把这些光束，都作为free的点
     if (m_octree->computeRayKeys(sensorOrigin, point, m_keyRay)){
       free_cells.insert(m_keyRay.begin(), m_keyRay.end());
     }
 
+    // 同时根据地面点对地图的范围进行更新
     octomap::OcTreeKey endKey;
     if (m_octree->coordToKeyChecked(point, endKey)){
       updateMinKey(endKey, m_updateBBXMin);
@@ -394,6 +402,7 @@ void OctomapServer::insertScan(const tf::Point& sensorOriginTf, const PCLPointCl
     }
   }
 
+  // 对于障碍物点；也是在途径点设置为free，endpoint设置为占用
   // all other points: free on ray, occupied on endpoint:
   for (PCLPointCloud::const_iterator it = nonground.begin(); it != nonground.end(); ++it){
     point3d point(it->x, it->y, it->z);
@@ -402,6 +411,7 @@ void OctomapServer::insertScan(const tf::Point& sensorOriginTf, const PCLPointCl
     
     // maxrange check
     if ((m_maxRange < 0.0) || ((point - sensorOrigin).norm() <= m_maxRange) ) {
+      // 在范围内的点
 
       // free cells
       if (m_octree->computeRayKeys(sensorOrigin, point, m_keyRay)){
@@ -438,6 +448,7 @@ void OctomapServer::insertScan(const tf::Point& sensorOriginTf, const PCLPointCl
     }
   }
 
+  // 设置成free的前提是当前没有被占用
   // mark free cells only if not seen occupied in this cloud
   for(KeySet::iterator it = free_cells.begin(), end=free_cells.end(); it!= end; ++it){
     if (occupied_cells.find(*it) == occupied_cells.end()){
@@ -445,6 +456,7 @@ void OctomapServer::insertScan(const tf::Point& sensorOriginTf, const PCLPointCl
     }
   }
 
+  // 那这个概率体现在哪里
   // now mark all occupied cells:
   for (KeySet::iterator it = occupied_cells.begin(), end=occupied_cells.end(); it!= end; it++) {
     m_octree->updateNode(*it, true);
@@ -832,10 +844,12 @@ void OctomapServer::publishFullOctoMap(const ros::Time& rostime) const{
 
 
 void OctomapServer::filterGroundPlane(const PCLPointCloud& pc, PCLPointCloud& ground, PCLPointCloud& nonground) const{
+  // 输入一个点云，分为两个部分： ground、nonground
   ground.header = pc.header;
   nonground.header = pc.header;
 
   if (pc.size() < 50){
+    // 如果点云很少，那就直接都当做是非地面
     ROS_WARN("Pointcloud in OctomapServer too small, skipping ground plane extraction");
     nonground = pc;
   } else {
@@ -843,6 +857,7 @@ void OctomapServer::filterGroundPlane(const PCLPointCloud& pc, PCLPointCloud& gr
     pcl::ModelCoefficients::Ptr coefficients (new pcl::ModelCoefficients);
     pcl::PointIndices::Ptr inliers (new pcl::PointIndices);
 
+    // 使用的点云分割？
     // Create the segmentation object and set up:
     pcl::SACSegmentation<PCLPoint> seg;
     seg.setOptimizeCoefficients (true);
@@ -853,6 +868,7 @@ void OctomapServer::filterGroundPlane(const PCLPointCloud& pc, PCLPointCloud& gr
     seg.setDistanceThreshold (m_groundFilterDistance);
     seg.setAxis(Eigen::Vector3f(0,0,1));
     seg.setEpsAngle(m_groundFilterAngle);
+    // 也是在这个方向上进行参数优化
 
 
     PCLPointCloud cloud_filtered(pc);
