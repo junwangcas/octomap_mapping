@@ -42,19 +42,17 @@ namespace octomap_server{
 OctomapServer::OctomapServer(const ros::NodeHandle private_nh_, const ros::NodeHandle &nh_)
 : m_nh(nh_),
   m_nh_private(private_nh_),
-  m_pointCloudSub(NULL),
-  m_tfPointCloudSub(NULL),
   m_reconfigureServer(m_config_mutex, private_nh_),
   m_octree(NULL),
   m_maxRange(-1.0),
   m_minRange(-1.0),
-  m_worldFrameId("/map"), m_baseFrameId("base_footprint"),
+  m_worldFrameId("map"), m_baseFrameId("base_footprint"),
   m_useHeightMap(true),
   m_useColoredMap(false),
   m_colorFactor(0.8),
   m_latchedTopics(true),
   m_publishFreeSpace(false),
-  m_res(0.05),
+  m_res(0.1),
   m_treeDepth(0),
   m_maxTreeDepth(0),
   m_pointcloudMinX(-std::numeric_limits<double>::max()),
@@ -163,20 +161,19 @@ OctomapServer::OctomapServer(const ros::NodeHandle private_nh_, const ros::NodeH
 
   m_nh_private.param("latch", m_latchedTopics, m_latchedTopics);
   if (m_latchedTopics){
-    ROS_INFO("Publishing latched (single publish will take longer, all topics are prepared)");
+    ROS_INFO("Publishing latched 1 (single publish will take longer, all topics are prepared)");
   } else
-    ROS_INFO("Publishing non-latched (topics are only prepared as needed, will only be re-published on map change");
+    ROS_INFO("Publishing non-latched 2 (topics are only prepared as needed, will only be re-published on map change");
 
-  m_markerPub = m_nh.advertise<visualization_msgs::MarkerArray>("occupied_cells_vis_array", 1, m_latchedTopics);
+  m_markerPub = m_nh.advertise<visualization_msgs::MarkerArray>("/octomap/occupied_cells_vis_array", 1, m_latchedTopics);
   m_binaryMapPub = m_nh.advertise<Octomap>("octomap_binary", 1, m_latchedTopics);
   m_fullMapPub = m_nh.advertise<Octomap>("octomap_full", 1, m_latchedTopics);
-  m_pointCloudPub = m_nh.advertise<sensor_msgs::PointCloud2>("octomap_point_cloud_centers", 1, m_latchedTopics);
+  m_pointCloudPub = m_nh.advertise<sensor_msgs::PointCloud2>("/octomap/octomap_point_cloud_centers", 1, m_latchedTopics);
   m_mapPub = m_nh.advertise<nav_msgs::OccupancyGrid>("projected_map", 5, m_latchedTopics);
   m_fmarkerPub = m_nh.advertise<visualization_msgs::MarkerArray>("free_cells_vis_array", 1, m_latchedTopics);
-
-  m_pointCloudSub = new message_filters::Subscriber<sensor_msgs::PointCloud2> (m_nh, "cloud_in", 5);
-  m_tfPointCloudSub = new tf::MessageFilter<sensor_msgs::PointCloud2> (*m_pointCloudSub, m_tfListener, m_worldFrameId, 5);
-  m_tfPointCloudSub->registerCallback(boost::bind(&OctomapServer::insertCloudCallback, this, boost::placeholders::_1));
+  std::cout << "sub cam pose\n";
+  sub_pose_ = m_nh.subscribe("/oa/camera_pose", 100, &OctomapServer::PoseCallback, this);
+  sub_pointcloud_ = m_nh.subscribe("/oa/point_cloud/cvp_g", 100, &OctomapServer::insertGlobalCloudCallback, this);
 
   m_octomapBinaryService = m_nh.advertiseService("octomap_binary", &OctomapServer::octomapBinarySrv, this);
   m_octomapFullService = m_nh.advertiseService("octomap_full", &OctomapServer::octomapFullSrv, this);
@@ -189,17 +186,6 @@ OctomapServer::OctomapServer(const ros::NodeHandle private_nh_, const ros::NodeH
 }
 
 OctomapServer::~OctomapServer(){
-  if (m_tfPointCloudSub){
-    delete m_tfPointCloudSub;
-    m_tfPointCloudSub = NULL;
-  }
-
-  if (m_pointCloudSub){
-    delete m_pointCloudSub;
-    m_pointCloudSub = NULL;
-  }
-
-
   if (m_octree){
     delete m_octree;
     m_octree = NULL;
@@ -272,7 +258,7 @@ void OctomapServer::insertCloudCallback(const sensor_msgs::PointCloud2::ConstPtr
 
   tf::StampedTransform sensorToWorldTf;
   try {
-    m_tfListener.lookupTransform(m_worldFrameId, cloud->header.frame_id, cloud->header.stamp, sensorToWorldTf);
+//    m_tfListener.lookupTransform(m_worldFrameId, cloud->header.frame_id, cloud->header.stamp, sensorToWorldTf);
   } catch(tf::TransformException& ex){
     ROS_ERROR_STREAM( "Transform error of sensor data: " << ex.what() << ", quitting callback");
     return;
@@ -299,9 +285,9 @@ void OctomapServer::insertCloudCallback(const sensor_msgs::PointCloud2::ConstPtr
   if (m_filterGroundPlane){
     tf::StampedTransform sensorToBaseTf, baseToWorldTf;
     try{
-      m_tfListener.waitForTransform(m_baseFrameId, cloud->header.frame_id, cloud->header.stamp, ros::Duration(0.2));
-      m_tfListener.lookupTransform(m_baseFrameId, cloud->header.frame_id, cloud->header.stamp, sensorToBaseTf);
-      m_tfListener.lookupTransform(m_worldFrameId, m_baseFrameId, cloud->header.stamp, baseToWorldTf);
+//      m_tfListener.waitForTransform(m_baseFrameId, cloud->header.frame_id, cloud->header.stamp, ros::Duration(0.2));
+//      m_tfListener.lookupTransform(m_baseFrameId, cloud->header.frame_id, cloud->header.stamp, sensorToBaseTf);
+//      m_tfListener.lookupTransform(m_worldFrameId, m_baseFrameId, cloud->header.stamp, baseToWorldTf);
 
 
     }catch(tf::TransformException& ex){
@@ -354,6 +340,61 @@ void OctomapServer::insertCloudCallback(const sensor_msgs::PointCloud2::ConstPtr
   publishAll(cloud->header.stamp);
 }
 
+void OctomapServer::insertGlobalCloudCallback(const sensor_msgs::PointCloud2::ConstPtr &cloud)
+{
+  PCLPointCloud pc;
+  pcl::fromROSMsg(*cloud, pc);
+
+  PCLPointCloud pc_ground;
+  PCLPointCloud pc_nonground; // everything else
+
+  pc_nonground = pc;
+  pc_ground.header = pc.header;
+  pc_nonground.header = pc.header;
+
+  {
+    // get pose
+    tf::Point pt_pose;
+    if (GetPose(pt_pose)) {
+      insertScan(pt_pose, pc_ground, pc_nonground);
+    } else {
+      std::cout << "get pose failed\n";
+    }
+  }
+
+  publishAll(cloud->header.stamp);
+
+  if (!m_octree->writeBinary(file_map_save_)) {
+    ROS_INFO("write binary map failed\n");
+  }
+}
+
+void OctomapServer::PoseCallback(const geometry_msgs::PoseStampedConstPtr &pose)
+{
+  static int pose_count = 0;
+  ROS_INFO("pose call back %d", pose_count++);
+  std::unique_lock<std::mutex> loc_pose(mutex_pose);
+  poses_.emplace_back(pose);
+  if (poses_.size() > 10) {
+    poses_.pop_front();
+  }
+}
+
+bool OctomapServer::GetPose(tf::Point &pose_vec3)
+{
+  std::unique_lock<std::mutex> loc_pose(mutex_pose);
+  if (poses_.empty()) {
+    std::cout << __FUNCTION__ << " pose empty\n";
+    return false;
+  }
+  auto poseptr = poses_.back();
+  pose_vec3.setX(poseptr->pose.position.x);
+  pose_vec3.setY(poseptr->pose.position.y);
+  pose_vec3.setZ(poseptr->pose.position.z);
+  poses_.pop_front();
+  return true;
+}
+
 void OctomapServer::insertScan(const tf::Point& sensorOriginTf, const PCLPointCloud& ground, const PCLPointCloud& nonground){
   point3d sensorOrigin = pointTfToOctomap(sensorOriginTf);
 
@@ -361,6 +402,7 @@ void OctomapServer::insertScan(const tf::Point& sensorOriginTf, const PCLPointCl
     || !m_octree->coordToKeyChecked(sensorOrigin, m_updateBBXMax))
   {
     ROS_ERROR_STREAM("Could not generate Key for origin "<<sensorOrigin);
+
   }
 
 #ifdef COLOR_OCTOMAP_SERVER

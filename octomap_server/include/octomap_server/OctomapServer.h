@@ -101,6 +101,8 @@ public:
   bool resetSrv(std_srvs::Empty::Request& req, std_srvs::Empty::Response& resp);
 
   virtual void insertCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& cloud);
+  virtual void insertGlobalCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& cloud);
+  virtual void PoseCallback(const geometry_msgs::PoseStampedConstPtr &pose);
   virtual bool openFile(const std::string& filename);
 
 protected:
@@ -204,11 +206,16 @@ protected:
   }
 
   static std_msgs::ColorRGBA heightMapColor(double h);
+
+  bool GetPose(tf::Point &pose_vec3);
+
   ros::NodeHandle m_nh;
   ros::NodeHandle m_nh_private;
   ros::Publisher  m_markerPub, m_binaryMapPub, m_fullMapPub, m_pointCloudPub, m_collisionObjectPub, m_mapPub, m_cmapPub, m_fmapPub, m_fmarkerPub;
-  message_filters::Subscriber<sensor_msgs::PointCloud2>* m_pointCloudSub;
-  tf::MessageFilter<sensor_msgs::PointCloud2>* m_tfPointCloudSub;
+  ros::Subscriber sub_pose_;
+  ros::Subscriber sub_pointcloud_;
+//  message_filters::Subscriber<sensor_msgs::PointCloud2>* m_pointCloudSub;
+//  tf::MessageFilter<sensor_msgs::PointCloud2>* m_tfPointCloudSub;
   ros::ServiceServer m_octomapBinaryService, m_octomapFullService, m_clearBBXService, m_resetService;
   tf::TransformListener m_tfListener;
   boost::recursive_mutex m_config_mutex;
@@ -265,6 +272,11 @@ protected:
   unsigned m_multires2DScale;
   bool m_projectCompleteMap;
   bool m_useColoredMap;
+
+  std::deque<geometry_msgs::PoseStampedConstPtr> poses_;
+  std::mutex mutex_pose;
+  std::string file_map_save_ = "/sdcard/slam/result/octomapmy.bt";
+
 };
 }
 
